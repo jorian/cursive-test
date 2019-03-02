@@ -10,6 +10,7 @@ use std::path::Path;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
+use std::rc::Rc;
 
 fn main() {
     let mut siv = Cursive::default();
@@ -42,7 +43,33 @@ fn file_picker<D: AsRef<Path>>(directory: D) -> SelectView<DirEntry> {
     }
     // when selecting a file, update statusbar
     // when clicking a file, load the contents in other pane:
-    view.on_select(update_status).on_submit(load_contents)
+    view.on_select(update_status).on_submit(submit_choice)
+}
+
+fn submit_choice(s: &mut Cursive, entry: &DirEntry) {
+    if entry.metadata().unwrap().is_dir() {
+        let mut picker = s.find_id::<SelectView<DirEntry>>("picker").unwrap();
+
+        let dir: Rc<DirEntry> = picker.selection().unwrap();
+        let dir = String::from(dir.path().to_str().unwrap());
+
+        picker.clear();
+
+        for entry in fs::read_dir(dir).expect("Unable to read") {
+            if let Ok(e) = entry {
+                let file_name = e.file_name().into_string().unwrap();
+                picker.add_item(file_name, e);
+            }
+        }
+    } else {
+        let mut text_view = s.find_id::<TextView>("contents").unwrap();
+        let mut buf = String::new();
+        dbg!(&entry.path());
+        let _ = File::open(entry.path())
+            .and_then(|mut f| f.read_to_string(&mut buf))
+            .map_err(|e| buf = format!("Error: {}", e));
+        text_view.set_content(buf)
+    }
 }
 
 fn update_status(s: &mut Cursive, entry: &DirEntry) {
@@ -56,11 +83,6 @@ fn update_status(s: &mut Cursive, entry: &DirEntry) {
 fn load_contents(s: &mut Cursive, entry: &DirEntry) {
     let mut text_view = s.find_id::<TextView>("contents").unwrap();
     let content = if entry.metadata().unwrap().is_dir() {
-        s.call_on_id("picker", |view: &mut SelectView<DirEntry>| {
-            dbg!(&view.selection().unwrap());
-            let dir = view.selection().unwrap();
-            
-        });
         String::from("<DIR>")
     } else {
         let mut buf = String::new();
