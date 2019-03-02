@@ -5,67 +5,69 @@ use cursive::{
     event::Key,
     view::*,
     views::*};
+use std::fs::DirEntry;
+use std::path::Path;
+use std::fs;
+use std::fs::File;
+use std::io::Read;
 
 fn main() {
     let mut siv = Cursive::default();
 
-    let selectv = SelectView::<String>::new()
-        .on_submit(select_name)
-        .with_id("selectv")
-        .fixed_size((20, 10));
-
-    let buttons = LinearLayout::vertical()
-        .child(Button::new("Add", add_name))
-        .child(Button::new("Remove", remove_name))
-        .child(DummyView)
-        .child(Button::new("Quit", Cursive::quit));
-
-    siv.add_layer(Dialog::around(LinearLayout::horizontal()
-        .child(selectv)
-        .child(DummyView)
-        .child(buttons))
-        .title("Select a profile"));
-
+    let mut boxes = LinearLayout::horizontal();
+    let picker = file_picker(".")
+        .with_id("picker");
+    boxes.add_child(picker.fixed_size((30, 25)));
+    boxes.add_child(DummyView);
+    boxes.add_child(TextView::new("file contents")
+        .with_id("contents")
+        .scrollable()
+        .fixed_size((65, 75)));
+    let mut layout = LinearLayout::vertical();
+    layout.add_child(boxes);
+    layout.add_child(TextView::new("status")
+        .with_id("status")
+        .fixed_size((80, 1)));
+    siv.add_layer(Dialog::around(layout).button("Quit", |a| a.quit()));
     siv.run();
 }
 
-fn select_name(s: &mut Cursive, name: &String) {
-    s.pop_layer();
-    s.add_layer(Dialog::text(format!("Name: {}\nAwesome: yes", name))
-        .title(format!("{}'s info", name))
-        .button("Quit", Cursive::quit));
-}
-
-fn add_name(s: &mut Cursive) {
-    fn ok(s: &mut Cursive, name: &str) {
-        s.call_on_id("selectv", |view: &mut SelectView<String>| {
-            view.add_item_str(name);
-        });
-        s.pop_layer();
-    }
-
-    s.add_layer(Dialog::around(
-        EditView::new()
-            .on_submit(ok)
-            .with_id("name")
-            .fixed_width(10))
-        .title("Enter a name")
-        .button("Ok", |e| {
-            let name = e.call_on_id("name", |view: &mut EditView| {
-                view.get_content()
-            }).unwrap();
-            ok(e, &name);
-        })
-        .button("Cancel", |e| { e.pop_layer(); })) // close popup
-
-}
-
-fn remove_name(s: &mut Cursive) {
-    let mut select = s.find_id::<SelectView<String>>("selectv").unwrap();
-    match select.selected_id() {
-        None => s.add_layer(Dialog::info("No name to remove")),
-        Some(focus) => {
-            select.remove_item(focus);
+fn file_picker<D: AsRef<Path>>(directory: D) -> SelectView<DirEntry> {
+    let mut view = SelectView::new();
+    for entry in fs::read_dir(directory).expect("Unable to read") {
+        if let Ok(e) = entry {
+            let file_name = e.file_name().into_string().unwrap();
+            view.add_item(file_name, e);
         }
     }
+    // when selecting a file, update statusbar
+    // when clicking a file, load the contents in other pane:
+    view.on_select(update_status).on_submit(load_contents)
+}
+
+fn update_status(s: &mut Cursive, entry: &DirEntry) {
+    let mut status_bar = s.find_id::<TextView>("status").unwrap();
+    let file_name = entry.file_name().into_string().unwrap();
+    let file_size = entry.metadata().unwrap().len();
+    let content = format!("{}: {} bytes", file_name, file_size);
+    status_bar.set_content(content);
+}
+
+fn load_contents(s: &mut Cursive, entry: &DirEntry) {
+    let mut text_view = s.find_id::<TextView>("contents").unwrap();
+    let content = if entry.metadata().unwrap().is_dir() {
+        s.call_on_id("picker", |view: &mut SelectView<DirEntry>| {
+            dbg!(&view.selection().unwrap());
+            let dir = view.selection().unwrap();
+            
+        });
+        String::from("<DIR>")
+    } else {
+        let mut buf = String::new();
+        let _ = File::open(entry.file_name())
+            .and_then(|mut f| f.read_to_string(&mut buf))
+            .map_err(|e| buf = format!("Error: {}", e));
+        buf
+    };
+    text_view.set_content(content)
 }
