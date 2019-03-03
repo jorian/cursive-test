@@ -5,4 +5,5 @@ authors = ["Jorian <jorian@outlook.com>"]
 edition = "2018"
 
 [dependencies]
-cursive = "0.10.0"
+cursive = { git = "https://github.com/gyscos/Cursive" }
+rand = "0.6.5"

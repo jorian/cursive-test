@@ -1,105 +1,141 @@
 extern crate cursive;
+extern crate rand;
 
 use cursive::{
     Cursive,
     event::Key,
     view::*,
     views::*};
-use std::fs::DirEntry;
-use std::path::Path;
-use std::fs;
-use std::fs::File;
-use std::io::Read;
-use std::rc::Rc;
-use std::path::PathBuf;
+use std::thread;
+use cursive::utils::Counter;
+use std::time::Duration;
+use rand::Rng;
+use std::cmp::min;
+
 
 fn main() {
     let mut siv = Cursive::default();
 
-    let mut panes = LinearLayout::horizontal();
-    let picker = file_picker(".")
-        .with_id("picker");
-    panes.add_child(picker.fixed_size((30, 25)));
-    panes.add_child(DummyView);
-    panes.add_child(TextView::new("file contents")
-        .with_id("contents")
-        .scrollable()
-        .fixed_size((65, 75)));
-    let mut layout = LinearLayout::vertical();
-    layout.add_child(panes);
-    layout.add_child(TextView::new("status")
-        .with_id("status")
-        .fixed_size((40, 1)));
-    siv.add_layer(Dialog::around(layout)
-        .button("Quit", |a| a.quit())
-        .button("Back", back));
+    siv.add_layer(
+        Dialog::new()
+            .title("Progress bar example")
+            .padding((0, 0, 1, 1))
+            .content(Button::new("Start", phase_1)),
+    );
+
     siv.run();
 }
 
-fn back(s: &mut Cursive) {
-    let mut picker = s.find_id::<SelectView<PathBuf>>("picker").unwrap();
-    let dir: Rc<PathBuf> = picker.selection().unwrap();
+fn phase_1(s: &mut Cursive) {
+    // Phase 1 is easy: a simple pre-loading.
 
-    let path = dir.clone().parent().unwrap().parent().unwrap().to_path_buf();
-    dbg!(&path);
+    // Number of ticks
+    let n_max = 1000;
 
-    picker.clear();
+    // This is the callback channel
+    let cb = s.cb_sink().clone();
 
-    for entry in fs::read_dir(path).expect("Unable to read") {
-        if let Ok(e) = entry {
-            let file_name = e.file_name().into_string().unwrap();
-            picker.add_item(file_name, e.path());
-        }
-    }
+    s.pop_layer();
+    s.add_layer(Dialog::around(
+        ProgressBar::new()
+            // We need to know how many ticks represent a full bar.
+            .range(0, n_max)
+            .with_task(move |counter| {
+                // This closure will be called in a separate thread.
+                fake_load(n_max, &counter);
+
+                // When we're done, send a callback through the channel
+                cb.send(Box::new(coffee_break)).unwrap();
+            })
+            .full_width(),
+    ));
+    s.set_autorefresh(true);
 }
 
-fn file_picker<D: AsRef<Path>>(directory: D) -> SelectView<PathBuf> {
-    let mut view = SelectView::new();
-    for entry in fs::read_dir(directory).expect("Unable to read") {
-        if let Ok(e) = entry {
-            let file_name = e.file_name().into_string().unwrap();
-            view.add_item(file_name, e.path());
-        }
-    }
-    // when selecting a file, update statusbar
-    // when clicking a file, load the contents in other pane:
-    view.on_select(update_status).on_submit(submit_choice)
+fn coffee_break(s: &mut Cursive) {
+    // A little break before things get serious.
+    s.set_autorefresh(false);
+    s.pop_layer();
+    s.add_layer(
+        Dialog::new()
+            .title("Preparation complete")
+            .content(TextView::new("Now, the real deal!").center())
+            .button("Again??", phase_2),
+    );
 }
 
-fn submit_choice(s: &mut Cursive, entry: &PathBuf) {
-    if entry.is_dir() {
-        let mut picker = s.find_id::<SelectView<PathBuf>>("picker").unwrap();
+fn phase_2(s: &mut Cursive) {
+    // Now, we'll run N tasks
+    // (It could be downloading a file, extracting an archive,
+    // reticulating sprites, ...)
+    let n_bars = 10;
+    // Each task will have its own shiny counter
+    let counters: Vec<_> = (0..n_bars).map(|_| Counter::new(0)).collect();
+    // To make things more interesting, we'll give a random speed to each bar
+    let speeds: Vec<_> = (0..n_bars)
+        .map(|_| rand::thread_rng().gen_range(50, 150))
+        .collect();
 
-        let dir: Rc<PathBuf> = picker.selection().unwrap();
-        let dir = String::from(dir.as_os_str().to_str().unwrap());
+    let n_max = 100_000;
+    let cb = s.cb_sink().clone();
 
-        dbg!(&dir);
-        picker.clear();
+    // Let's prepare the progress bars...
+    let mut linear = LinearLayout::vertical();
+    for c in &counters {
+        linear.add_child(ProgressBar::new().max(n_max).with_value(c.clone()));
+    }
 
-        for entry in fs::read_dir(dir).expect("Unable to read") {
-            if let Ok(e) = entry {
-                let file_name = e.file_name().into_string().unwrap();
-                picker.add_item(file_name, e.path());
+    s.pop_layer();
+    s.add_layer(Dialog::around(linear.full_width()).title("Just a moment..."));
+
+    // And we start the worker thread.
+    thread::spawn(move || {
+        println!("thread!");
+        loop {
+            thread::sleep(Duration::from_millis(5));
+            let mut done = true;
+            for (c, s) in counters.iter().zip(&speeds) {
+                let ticks = min(n_max - c.get(), *s);
+                c.tick(ticks);
+                if c.get() < n_max {
+                    done = false;
+                }
+            }
+            if done {
+                break;
             }
         }
-    } else {
-        let mut text_view = s.find_id::<TextView>("contents").unwrap();
-        let mut buf = String::new();
-        dbg!(&entry.to_str().unwrap());
 
-        let _ = File::open(entry)
-            .and_then(|mut f| f.read_to_string(&mut buf))
-            .map_err(|e| Dialog::info(format!("Error: {}", e.to_string())));
-        text_view.set_content(buf)
-    }
+        // call final_step when all progress bars are at 100%
+        cb.send(Box::new(final_step)).unwrap();
+    });
+    println!("set autorefresh");
+    s.set_autorefresh(true);
 }
 
-fn update_status(s: &mut Cursive, entry: &PathBuf) {
-    let mut status_bar = s.find_id::<TextView>("status").unwrap();
-    let file_name = entry.to_str().unwrap();
-    dbg!(&file_name);
-    let file_size = entry.metadata().unwrap().len();
-    let content = format!("{}: {} bytes", file_name, file_size);
-    dbg!(&content);
-    status_bar.set_content(content);
+fn final_step(s: &mut Cursive) {
+    // A little break before things get serious.
+    s.set_autorefresh(false);
+    s.pop_layer();
+    s.add_layer(
+        Dialog::new()
+            .title("Report")
+            .content(
+                TextView::new(
+                    "Time travel was a success!\n\
+                     We went forward a few seconds!!",
+                )
+                    .center(),
+            )
+            .button("That's it?", |s| s.quit()),
+    );
+}
+
+// Function to simulate a long process.
+fn fake_load(n_max: usize, counter: &Counter) {
+    for _ in 0..n_max {
+        thread::sleep(Duration::from_millis(5));
+        // The `counter.tick()` method increases the progress value
+        counter.tick(1);
+    }
 }
